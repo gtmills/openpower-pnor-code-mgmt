@@ -1,6 +1,7 @@
 #include <experimental/filesystem>
 #include "activation.hpp"
 #include "config.h"
+#include "item_updater.hpp"
 
 namespace openpower
 {
@@ -26,6 +27,37 @@ void Activation::subscribeToSystemdSignals()
     return;
 }
 
+void Activation::createSymlinks()
+{
+    if (!fs::is_directory(PNOR_ACTIVE_PATH))
+    {
+        fs::create_directories(PNOR_ACTIVE_PATH);
+    }
+
+    // If the RW or RO active links exist, remove them and create new
+    // ones pointing to the active version.
+    if (fs::is_symlink(PNOR_RO_ACTIVE_PATH))
+    {
+        fs::remove(PNOR_RO_ACTIVE_PATH);
+    }
+    fs::create_directory_symlink(PNOR_RO_PREFIX + versionId,
+            PNOR_RO_ACTIVE_PATH);
+    if (fs::is_symlink(PNOR_RW_ACTIVE_PATH))
+    {
+        fs::remove(PNOR_RW_ACTIVE_PATH);
+    }
+    fs::create_directory_symlink(PNOR_RW_PREFIX + versionId,
+            PNOR_RW_ACTIVE_PATH);
+
+    // There is only one preserved directory as it is not tied to a
+    // version, so just create the link if it doesn't exist already
+    if (!fs::is_symlink(PNOR_PRSV_ACTIVE_PATH))
+    {
+        fs::create_directory_symlink(PNOR_PRSV,
+                PNOR_PRSV_ACTIVE_PATH);
+    }
+}
+
 auto Activation::activation(Activations value) ->
         Activations
 {
@@ -44,6 +76,12 @@ auto Activation::activation(Activations value) ->
             // If the squashfs image has not yet been loaded to pnor and the
             // RW volumes have not yet been created, we need to start the
             // service files for each of those actions.
+
+            if (!activationProgress)
+            {
+                activationProgress = std::make_unique<ActivationProgress>(bus,
+                        path);
+            }
 
             if (!activationBlocksTransition)
             {
@@ -77,6 +115,8 @@ auto Activation::activation(Activations value) ->
             method.append(ubimountServiceFile, "replace");
             bus.call_noreply(method);
 
+            activationProgress->progress(10);
+
             return softwareServer::Activation::activation(value);
         }
         else if (squashfsLoaded == true && rwVolumesCreated == true)
@@ -94,33 +134,8 @@ auto Activation::activation(Activations value) ->
                 (fs::is_directory(PNOR_RW_PREFIX + versionId)) &&
                 (fs::is_directory(PNOR_RO_PREFIX + versionId)))
             {
-                if (!fs::is_directory(PNOR_ACTIVE_PATH))
-                {
-                    fs::create_directories(PNOR_ACTIVE_PATH);
-                }
-
-                // If the RW or RO active links exist, remove them and create new
-                // ones pointing to the active version.
-                if (fs::is_symlink(PNOR_RO_ACTIVE_PATH))
-                {
-                    fs::remove(PNOR_RO_ACTIVE_PATH);
-                }
-                fs::create_directory_symlink(PNOR_RO_PREFIX + versionId,
-                        PNOR_RO_ACTIVE_PATH);
-                if (fs::is_symlink(PNOR_RW_ACTIVE_PATH))
-                {
-                    fs::remove(PNOR_RW_ACTIVE_PATH);
-                }
-                fs::create_directory_symlink(PNOR_RW_PREFIX + versionId,
-                        PNOR_RW_ACTIVE_PATH);
-
-                // There is only one preserved directory as it is not tied to a
-                // version, so just create the link if it doesn't exist already.
-                if (!fs::is_symlink(PNOR_PRSV_ACTIVE_PATH))
-                {
-                    fs::create_directory_symlink(PNOR_PRSV,
-                            PNOR_PRSV_ACTIVE_PATH);
-                }
+                activationProgress->progress(90);
+                createSymlinks();
 
                 // Set Redundancy Priority before setting to Active
                 if (!redundancyPriority)
@@ -128,15 +143,28 @@ auto Activation::activation(Activations value) ->
                     redundancyPriority =
                               std::make_unique<RedundancyPriority>(
                                         bus,
-                                        path);
+                                        path,
+                                        *this,
+                                        0);
                 }
+
+                activationProgress->progress(100);
+
                 activationBlocksTransition.reset(nullptr);
+                activationProgress.reset(nullptr);
+
+                squashfsLoaded = false;
+                rwVolumesCreated = false;
+
+                //TODO: openbmc/openbmc#1843: Unsubscribe from systemd signals.
+
                 return softwareServer::Activation::activation(
                         softwareServer::Activation::Activations::Active);
             }
             else
             {
                 activationBlocksTransition.reset(nullptr);
+                activationProgress.reset(nullptr);
                 return softwareServer::Activation::activation(
                         softwareServer::Activation::Activations::Failed);
             }
@@ -152,6 +180,7 @@ auto Activation::activation(Activations value) ->
     else
     {
         activationBlocksTransition.reset(nullptr);
+        activationProgress.reset(nullptr);
         return softwareServer::Activation::activation(value);
     }
 }
@@ -181,6 +210,15 @@ auto Activation::requestedActivation(RequestedActivations value) ->
 
 uint8_t RedundancyPriority::priority(uint8_t value)
 {
+    parent.parent.freePriority(value);
+
+    if(parent.parent.isLowestPriority(value))
+    {
+        // Need to update the symlinks to point to Software Version
+        // with lowest priority.
+        parent.createSymlinks();
+    }
+
     return softwareServer::RedundancyPriority::priority(value);
 }
 
@@ -202,12 +240,14 @@ void Activation::unitStateChange(sdbusplus::message::message& msg)
 
     if(newStateUnit == squashfsMountServiceFile && newStateResult == "done")
     {
-       squashfsLoaded = true;
+        squashfsLoaded = true;
+        activationProgress->progress(activationProgress->progress() + 20);
     }
 
     if(newStateUnit == ubimountServiceFile && newStateResult == "done")
     {
         rwVolumesCreated = true;
+        activationProgress->progress(activationProgress->progress() + 50);
     }
 
     if(squashfsLoaded && rwVolumesCreated)

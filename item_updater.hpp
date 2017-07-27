@@ -39,7 +39,31 @@ class ItemUpdater : public ItemUpdaterInherit
                                     this,
                                     std::placeholders::_1))
         {
+            processPNORImage();
         }
+
+        /** @brief Sets the given priority free by incrementing
+         *  any existing priority with the same value by 1
+         *
+         *  @param[in] value - The priority that needs to be set free.
+         *
+         *  @return None
+         */
+        void freePriority(uint8_t value);
+
+        /** @brief Determine is the given priority is the lowest
+         *
+         *  @param[in] value - The priority that needs to be checked.
+         *
+         *  @return boolean corresponding to whether the given
+         *           priority is lowest.
+         */
+        bool isLowestPriority(uint8_t value);
+
+        /**
+         * @brief Create and populate the active PNOR Version.
+         */
+        void processPNORImage();
 
     private:
         /** @brief Callback function for Software.Version match.
@@ -49,15 +73,6 @@ class ItemUpdater : public ItemUpdaterInherit
          */
         void createActivation(sdbusplus::message::message& msg);
 
-        /**
-         * @brief Get the extended version from the specified file.
-         *
-         * @param[in] manifestFilePath  - File to read.
-         *
-         * @return The extended version.
-         */
-        static std::string getExtendedVersion(const std::string&
-                                               manifestFilePath);
         /**
          * @brief Validates the presence of SquashFS iamge in the image dir.
          *

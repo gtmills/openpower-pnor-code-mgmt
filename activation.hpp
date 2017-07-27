@@ -5,6 +5,7 @@
 #include <xyz/openbmc_project/Software/ActivationBlocksTransition/server.hpp>
 #include "xyz/openbmc_project/Software/ExtendedVersion/server.hpp"
 #include "xyz/openbmc_project/Software/RedundancyPriority/server.hpp"
+#include "xyz/openbmc_project/Software/ActivationProgress/server.hpp"
 
 namespace openpower
 {
@@ -20,8 +21,14 @@ using ActivationBlocksTransitionInherit = sdbusplus::server::object::object<
  sdbusplus::xyz::openbmc_project::Software::server::ActivationBlocksTransition>;
 using RedundancyPriorityInherit = sdbusplus::server::object::object<
     sdbusplus::xyz::openbmc_project::Software::server::RedundancyPriority>;
+using ActivationProgressInherit = sdbusplus::server::object::object<
+    sdbusplus::xyz::openbmc_project::Software::server::ActivationProgress>;
 
 namespace sdbusRule = sdbusplus::bus::match::rules;
+
+class ItemUpdater;
+class Activation;
+class RedundancyPriority;
 
 /** @class RedundancyPriority
  *  @brief OpenBMC RedundancyPriority implementation
@@ -35,16 +42,29 @@ class RedundancyPriority : public RedundancyPriorityInherit
          *
          *  @param[in] bus    - The Dbus bus object
          *  @param[in] path   - The Dbus object path
+         *  @param[in] parent - Parent object.
+         *  @param[in] value  - The redundancyPriority value
          */
         RedundancyPriority(sdbusplus::bus::bus& bus,
-                                   const std::string& path) :
+                                   const std::string& path,
+                                   Activation& parent,
+                                   uint8_t value) :
                                    RedundancyPriorityInherit(bus,
-                                   path.c_str(), true)
+                                   path.c_str(), true),
+                                   parent(parent),
+                                   bus(bus),
+                                   path(path)
         {
             // Set Property
-            priority(0);
-            // Emit deferred signal.
-            emit_object_added();
+            priority(value);
+            std::vector<std::string> interfaces({interface});
+            bus.emit_interfaces_added(path.c_str(), interfaces);
+        }
+
+        ~RedundancyPriority()
+        {
+            std::vector<std::string> interfaces({interface});
+            bus.emit_interfaces_removed(path.c_str(), interfaces);
         }
 
         /** @brief Overloaded Priority property set function
@@ -54,6 +74,22 @@ class RedundancyPriority : public RedundancyPriorityInherit
          *  @return Success or exception thrown
          */
         uint8_t priority(uint8_t value) override;
+
+        /** @brief Priority property get function
+         *
+         * @returns uint8_t - The Priority value
+         */
+        using RedundancyPriorityInherit::priority;
+
+        /** @brief Parent Object. */
+        Activation& parent;
+
+    private:
+        // TODO Remove once openbmc/openbmc#1975 is resolved
+        static constexpr auto interface =
+                "xyz.openbmc_project.Software.RedundancyPriority";
+        sdbusplus::bus::bus& bus;
+        std::string path;
 };
 
 /** @class ActivationBlocksTransition
@@ -71,7 +107,59 @@ class ActivationBlocksTransition : public ActivationBlocksTransitionInherit
          */
         ActivationBlocksTransition(sdbusplus::bus::bus& bus,
                                    const std::string& path) :
-                   ActivationBlocksTransitionInherit(bus, path.c_str()) {}
+                   ActivationBlocksTransitionInherit(bus, path.c_str(), true),
+                   bus(bus),
+                   path(path)
+        {
+            std::vector<std::string> interfaces({interface});
+            bus.emit_interfaces_added(path.c_str(), interfaces);
+        }
+
+        ~ActivationBlocksTransition()
+        {
+            std::vector<std::string> interfaces({interface});
+            bus.emit_interfaces_removed(path.c_str(), interfaces);
+        }
+
+    private:
+        // TODO Remove once openbmc/openbmc#1975 is resolved
+        static constexpr auto interface =
+                "xyz.openbmc_project.Software.ActivationBlocksTransition";
+        sdbusplus::bus::bus& bus;
+        std::string path;
+};
+
+class ActivationProgress : public ActivationProgressInherit
+{
+    public:
+        /** @brief Constructs ActivationProgress.
+         *
+         * @param[in] bus    - The Dbus bus object
+         * @param[in] path   - The Dbus object path
+         */
+        ActivationProgress(sdbusplus::bus::bus& bus,
+                           const std::string& path) :
+                   ActivationProgressInherit(bus, path.c_str(), true),
+                   bus(bus),
+                   path(path)
+       {
+           progress(0);
+           std::vector<std::string> interfaces({interface});
+           bus.emit_interfaces_added(path.c_str(), interfaces);
+       }
+
+        ~ActivationProgress()
+        {
+            std::vector<std::string> interfaces({interface});
+            bus.emit_interfaces_removed(path.c_str(), interfaces);
+        }
+
+    private:
+        // TODO Remove once openbmc/openbmc#1975 is resolved
+        static constexpr auto interface =
+                "xyz.openbmc_project.Software.ActivationProgress";
+        sdbusplus::bus::bus& bus;
+        std::string path;
 };
 
 /** @class Activation
@@ -86,11 +174,13 @@ class Activation : public ActivationInherit
          *
          * @param[in] bus    - The Dbus bus object
          * @param[in] path   - The Dbus object path
+         * @param[in] parent - Parent object.
          * @param[in] versionId  - The software version id
          * @param[in] extVersion - The extended version
          * @param[in] activationStatus - The status of Activation
          */
         Activation(sdbusplus::bus::bus& bus, const std::string& path,
+                   ItemUpdater& parent,
                    std::string& versionId,
                    std::string& extVersion,
                    sdbusplus::xyz::openbmc_project::Software::
@@ -98,6 +188,7 @@ class Activation : public ActivationInherit
                    ActivationInherit(bus, path.c_str(), true),
                    bus(bus),
                    path(path),
+                   parent(parent),
                    versionId(versionId),
                    systemdSignals(
                            bus,
@@ -135,6 +226,9 @@ class Activation : public ActivationInherit
         RequestedActivations requestedActivation(RequestedActivations value)
                 override;
 
+        /** @brief Create symlinks for the current Software Version */
+        void createSymlinks();
+
         /** @brief Check if systemd state change is relevant to this object
          *
          * Instance specific interface to handle the detected systemd state
@@ -160,11 +254,17 @@ class Activation : public ActivationInherit
         /** @brief Persistent DBus object path */
         std::string path;
 
+        /** @brief Parent Object. */
+        ItemUpdater& parent;
+
         /** @brief Version id */
         std::string versionId;
 
         /** @brief Persistent ActivationBlocksTransition dbus object */
         std::unique_ptr<ActivationBlocksTransition> activationBlocksTransition;
+
+        /** @brief Persistent ActivationProgress dbus object */
+        std::unique_ptr<ActivationProgress> activationProgress;
 
         /** @brief Persistent RedundancyPriority dbus object */
         std::unique_ptr<RedundancyPriority> redundancyPriority;
