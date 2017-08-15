@@ -6,6 +6,7 @@
 #include "xyz/openbmc_project/Software/ExtendedVersion/server.hpp"
 #include "xyz/openbmc_project/Software/RedundancyPriority/server.hpp"
 #include "xyz/openbmc_project/Software/ActivationProgress/server.hpp"
+#include "xyz/openbmc_project/Object/Delete/server.hpp"
 
 namespace openpower
 {
@@ -15,6 +16,7 @@ namespace updater
 {
 
 using ActivationInherit = sdbusplus::server::object::object<
+    sdbusplus::xyz::openbmc_project::Object::server::Delete,
     sdbusplus::xyz::openbmc_project::Software::server::ExtendedVersion,
     sdbusplus::xyz::openbmc_project::Software::server::Activation>;
 using ActivationBlocksTransitionInherit = sdbusplus::server::object::object<
@@ -248,6 +250,15 @@ class Activation : public ActivationInherit
          **/
         void subscribeToSystemdSignals();
 
+        /**
+         * @brief unsubscribe from the systemd signals
+         *
+         * Once the activation process has completed successfully, we can
+         * safely unsubscribe from systemd signals.
+         *
+         **/
+        void unsubscribeFromSystemdSignals();
+
         /** @brief Persistent sdbusplus DBus bus connection */
         sdbusplus::bus::bus& bus;
 
@@ -279,6 +290,25 @@ class Activation : public ActivationInherit
         /** @brief Tracks whether the read-write volumes have been created as
          * part of the activation process. **/
         bool rwVolumesCreated = false;
+
+        /** @brief activation status property get function
+         *
+         * @returns Activations - The activation value
+         */
+        using ActivationInherit::activation;
+
+        /** @brief Deletes the d-bus object.
+         *
+         *
+         * */
+        void delete_() override;
+
+    private:
+        /** @brief Member function for clarity & brevity at activation start */
+        void startActivation();
+
+        /** @brief Member function for clarity & brevity at activation end */
+        void finishActivation();
 };
 
 } // namespace updater

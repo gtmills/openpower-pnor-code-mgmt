@@ -7,6 +7,7 @@
 #include "config.h"
 #include "item_updater.hpp"
 #include "activation.hpp"
+#include "serialize.hpp"
 
 namespace openpower
 {
@@ -121,58 +122,116 @@ void ItemUpdater::createActivation(sdbusplus::message::message& m)
                                 path,
                                 version,
                                 purpose,
-                                filePath)));
+                                filePath,
+                                *this)));
+    }
+    else
+    {
+        log<level::INFO>("Software Object with the same version already exists",
+                        entry("VERSION_ID=%s", versionId));
     }
     return;
 }
 
 void ItemUpdater::processPNORImage()
 {
-
-    fs::path pnorTOC(PNOR_RO_ACTIVE_PATH);
-    pnorTOC /= PNOR_TOC_FILE;
-    std::ifstream efile(pnorTOC.c_str());
-    if (efile.good() != 1)
+    // Read pnor.toc from folders under /media/
+    // to get Active Software Versions.
+    for(const auto& iter : fs::directory_iterator(MEDIA_DIR))
     {
-        log<level::INFO>("Error PNOR current version is empty");
-        return;
+        auto activationState = server::Activation::Activations::Active;
+
+        static const auto PNOR_RO_PREFIX_LEN = strlen(PNOR_RO_PREFIX);
+
+        // Check if the PNOR_RO_PREFIX is the prefix of the iter.path
+        if (0 == iter.path().native().compare(0, PNOR_RO_PREFIX_LEN,
+                                              PNOR_RO_PREFIX))
+        {
+            auto pnorTOC = iter.path() / PNOR_TOC_FILE;
+            if (!fs::is_regular_file(pnorTOC))
+            {
+                log<level::ERR>("Failed to read pnorTOC\n",
+                                entry("FileName=%s", pnorTOC.string()));
+                activationState = server::Activation::Activations::Invalid;
+            }
+            auto keyValues =
+                    Version::getValue(pnorTOC,
+                                      {{ "version", "" },
+                                       { "extended_version", "" } });
+            auto& version = keyValues.at("version");
+            if (version.empty())
+            {
+                log<level::ERR>("Failed to read version from pnorTOC",
+                                entry("FILENAME=%s", pnorTOC.string()));
+                activationState = server::Activation::Activations::Invalid;
+            }
+
+            auto& extendedVersion = keyValues.at("extended_version");
+            if (extendedVersion.empty())
+            {
+                log<level::ERR>("Failed to read extendedVersion from pnorTOC",
+                                entry("FILENAME=%s", pnorTOC.string()));
+                activationState = server::Activation::Activations::Invalid;
+            }
+
+            // The versionId is extracted from the path
+            // for example /media/pnor-ro-2a1022fe
+            auto id = iter.path().native().substr(PNOR_RO_PREFIX_LEN);
+            auto purpose = server::Version::VersionPurpose::Host;
+            auto path = fs::path(SOFTWARE_OBJPATH) / id;
+
+            // Create Activation instance for this version.
+            activations.insert(std::make_pair(
+                                   id,
+                                   std::make_unique<Activation>(
+                                       bus,
+                                       path,
+                                       *this,
+                                       id,
+                                       extendedVersion,
+                                       activationState)));
+
+            // If Active, create RedundancyPriority instance for this version.
+            if (activationState == server::Activation::Activations::Active)
+            {
+                if(fs::is_regular_file(PERSIST_DIR + id))
+                {
+                    uint8_t priority;
+                    restoreFromFile(id, &priority);
+                    activations.find(id)->second->redundancyPriority =
+                             std::make_unique<RedundancyPriority>(
+                                 bus,
+                                 path,
+                                 *(activations.find(id)->second),
+                                 priority);
+                }
+                else
+                {
+                    activations.find(id)->second->activation(
+                            server::Activation::Activations::Invalid);
+                }
+
+            }
+
+            // Create Version instance for this version.
+            versions.insert(std::make_pair(
+                                id,
+                                std::make_unique<Version>(
+                                     bus,
+                                     path,
+                                     version,
+                                     purpose,
+                                     "",
+                                     *this)));
+        }
     }
-    auto keyValues = Version::getValue(pnorTOC.string(),
-        std::map<std::string, std::string> {{"version", ""},
-        {"extended_version", ""}});
-    std::string version = keyValues.at("version");
-    std::string extendedVersion = keyValues.at("extended_version");
-    auto id = Version::getId(version);
-    auto purpose = server::Version::VersionPurpose::Host;
-    auto path =  std::string{SOFTWARE_OBJPATH} + '/' + id;
-    auto activationState = server::Activation::Activations::Active;
-    activations.insert(std::make_pair(
-                           id,
-                           std::make_unique<Activation>(
-                               bus,
-                               path,
-                               *this,
-                               id,
-                               extendedVersion,
-                               activationState)));
-    versions.insert(std::make_pair(
-                        id,
-                        std::make_unique<Version>(
-                             bus,
-                             path,
-                             version,
-                             purpose,
-                             "")));
     return;
 }
 
 int ItemUpdater::validateSquashFSImage(const std::string& filePath)
 {
-    fs::path file(filePath);
-    file /= squashFSImage;
-    std::ifstream efile(file.c_str());
-
-    if (efile.good() == 1)
+    auto file = fs::path(filePath) / squashFSImage;
+    if (fs::is_regular_file(file))
     {
         return 0;
     }
@@ -183,11 +242,24 @@ int ItemUpdater::validateSquashFSImage(const std::string& filePath)
     }
 }
 
-void ItemUpdater::reset()
+void ItemUpdater::removeReadOnlyPartition(std::string versionId)
 {
-    for(const auto& it : activations)
-    {
-        auto serviceFile = "obmc-flash-bios-ubiumount-rw@" + it.first +
+        auto serviceFile = "obmc-flash-bios-ubiumount-ro@" + versionId +
+                ".service";
+
+        // Remove the read-only partitions.
+        auto method = bus.new_method_call(
+                SYSTEMD_BUSNAME,
+                SYSTEMD_PATH,
+                SYSTEMD_INTERFACE,
+                "StartUnit");
+        method.append(serviceFile, "replace");
+        bus.call_noreply(method);
+}
+
+void ItemUpdater::removeReadWritePartition(std::string versionId)
+{
+        auto serviceFile = "obmc-flash-bios-ubiumount-rw@" + versionId +
                 ".service";
 
         // Remove the read-write partitions.
@@ -198,8 +270,10 @@ void ItemUpdater::reset()
                 "StartUnit");
         method.append(serviceFile, "replace");
         bus.call_noreply(method);
-    }
+}
 
+void ItemUpdater::removePreservedPartition()
+{
     // Remove the preserved partition.
     auto method = bus.new_method_call(
             SYSTEMD_BUSNAME,
@@ -209,6 +283,17 @@ void ItemUpdater::reset()
     method.append("obmc-flash-bios-ubiumount-prsv.service", "replace");
     bus.call_noreply(method);
 
+    return;
+}
+
+void ItemUpdater::reset()
+{
+    for(const auto& it : activations)
+    {
+        removeReadWritePartition(it.first);
+        removeFile(it.first);
+    }
+    removePreservedPartition();
     return;
 }
 
@@ -240,6 +325,36 @@ bool ItemUpdater::isLowestPriority(uint8_t value)
         }
     }
     return true;
+}
+
+void ItemUpdater::erase(std::string entryId)
+{
+    // Removing partitions
+    removeReadWritePartition(entryId);
+    removeReadOnlyPartition(entryId);
+
+    // Removing entry in versions map
+    auto it = versions.find(entryId);
+    if (it == versions.end())
+    {
+        log<level::ERR>(("Error: Failed to find version " + entryId + \
+                        " in item updater versions map." \
+                        " Unable to remove.").c_str());
+        return;
+    }
+    versions.erase(entryId);
+
+    // Removing entry in activations map
+    auto ita = activations.find(entryId);
+    if (ita == activations.end())
+    {
+        log<level::ERR>(("Error: Failed to find version " + entryId + \
+                        " in item updater activations map." \
+                        " Unable to remove.").c_str());
+        return;
+    }
+    activations.erase(entryId);
+    removeFile(entryId);
 }
 
 } // namespace updater
