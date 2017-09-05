@@ -7,6 +7,7 @@
 #include "xyz/openbmc_project/Software/RedundancyPriority/server.hpp"
 #include "xyz/openbmc_project/Software/ActivationProgress/server.hpp"
 #include "xyz/openbmc_project/Object/Delete/server.hpp"
+#include "org/openbmc/Associations/server.hpp"
 
 namespace openpower
 {
@@ -15,10 +16,13 @@ namespace software
 namespace updater
 {
 
+using AssociationList =
+        std::vector<std::tuple<std::string, std::string, std::string>>;
 using ActivationInherit = sdbusplus::server::object::object<
     sdbusplus::xyz::openbmc_project::Object::server::Delete,
     sdbusplus::xyz::openbmc_project::Software::server::ExtendedVersion,
-    sdbusplus::xyz::openbmc_project::Software::server::Activation>;
+    sdbusplus::xyz::openbmc_project::Software::server::Activation,
+    sdbusplus::org::openbmc::server::Associations>;
 using ActivationBlocksTransitionInherit = sdbusplus::server::object::object<
  sdbusplus::xyz::openbmc_project::Software::server::ActivationBlocksTransition>;
 using RedundancyPriorityInherit = sdbusplus::server::object::object<
@@ -180,13 +184,15 @@ class Activation : public ActivationInherit
          * @param[in] versionId  - The software version id
          * @param[in] extVersion - The extended version
          * @param[in] activationStatus - The status of Activation
+         * @param[in] assocs - Association objects
          */
         Activation(sdbusplus::bus::bus& bus, const std::string& path,
                    ItemUpdater& parent,
                    std::string& versionId,
                    std::string& extVersion,
                    sdbusplus::xyz::openbmc_project::Software::
-                   server::Activation::Activations activationStatus) :
+                   server::Activation::Activations activationStatus,
+                   AssociationList& assocs) :
                    ActivationInherit(bus, path.c_str(), true),
                    bus(bus),
                    path(path),
@@ -207,9 +213,17 @@ class Activation : public ActivationInherit
             // Set Properties.
             extendedVersion(extVersion);
             activation(activationStatus);
+            associations(assocs);
+
             // Emit deferred signal.
             emit_object_added();
         }
+
+        /** @brief Activation property get function
+         *
+         *  @returns One of Activation::Activations
+         */
+        using ActivationInherit::activation;
 
         /** @brief Overloaded Activation property setter function
          *
@@ -227,9 +241,6 @@ class Activation : public ActivationInherit
          */
         RequestedActivations requestedActivation(RequestedActivations value)
                 override;
-
-        /** @brief Create symlinks for the current Software Version */
-        void createSymlinks();
 
         /** @brief Check if systemd state change is relevant to this object
          *

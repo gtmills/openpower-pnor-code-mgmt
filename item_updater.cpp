@@ -106,6 +106,13 @@ void ItemUpdater::createActivation(sdbusplus::message::message& m)
         std::string extendedVersion = (Version::getValue(manifestPath.string(),
                  std::map<std::string, std::string>
                  {{"extended_version", ""}})).begin()->second;
+
+        // Create an association to the host inventory item
+        AssociationList associations{(std::make_tuple(
+                                          ACTIVATION_FWD_ASSOCIATION,
+                                          ACTIVATION_REV_ASSOCIATION,
+                                          HOST_INVENTORY_PATH))};
+
         activations.insert(std::make_pair(
                 versionId,
                 std::make_unique<Activation>(
@@ -114,7 +121,8 @@ void ItemUpdater::createActivation(sdbusplus::message::message& m)
                         *this,
                         versionId,
                         extendedVersion,
-                        activationState)));
+                        activationState,
+                        associations)));
         versions.insert(std::make_pair(
                             versionId,
                             std::make_unique<Version>(
@@ -128,7 +136,7 @@ void ItemUpdater::createActivation(sdbusplus::message::message& m)
     else
     {
         log<level::INFO>("Software Object with the same version already exists",
-                        entry("VERSION_ID=%s", versionId));
+                         entry("VERSION_ID=%s", versionId));
     }
     return;
 }
@@ -137,7 +145,7 @@ void ItemUpdater::processPNORImage()
 {
     // Read pnor.toc from folders under /media/
     // to get Active Software Versions.
-    for(const auto& iter : fs::directory_iterator(MEDIA_DIR))
+    for (const auto& iter : fs::directory_iterator(MEDIA_DIR))
     {
         auto activationState = server::Activation::Activations::Active;
 
@@ -180,6 +188,13 @@ void ItemUpdater::processPNORImage()
             auto purpose = server::Version::VersionPurpose::Host;
             auto path = fs::path(SOFTWARE_OBJPATH) / id;
 
+
+            // Create an association to the host inventory item
+            AssociationList associations{(std::make_tuple(
+                                              ACTIVATION_FWD_ASSOCIATION,
+                                              ACTIVATION_REV_ASSOCIATION,
+                                              HOST_INVENTORY_PATH))};
+
             // Create Activation instance for this version.
             activations.insert(std::make_pair(
                                    id,
@@ -189,28 +204,24 @@ void ItemUpdater::processPNORImage()
                                        *this,
                                        id,
                                        extendedVersion,
-                                       activationState)));
+                                       activationState,
+                                       associations)));
 
             // If Active, create RedundancyPriority instance for this version.
             if (activationState == server::Activation::Activations::Active)
             {
-                if(fs::is_regular_file(PERSIST_DIR + id))
+                uint8_t priority = std::numeric_limits<uint8_t>::max();
+                if (!restoreFromFile(id, priority))
                 {
-                    uint8_t priority;
-                    restoreFromFile(id, &priority);
-                    activations.find(id)->second->redundancyPriority =
-                             std::make_unique<RedundancyPriority>(
-                                 bus,
-                                 path,
-                                 *(activations.find(id)->second),
-                                 priority);
+                    log<level::ERR>("Unable to restore priority from file.",
+                                    entry("VERSIONID=%s", id));
                 }
-                else
-                {
-                    activations.find(id)->second->activation(
-                            server::Activation::Activations::Invalid);
-                }
-
+                activations.find(id)->second->redundancyPriority =
+                         std::make_unique<RedundancyPriority>(
+                             bus,
+                             path,
+                             *(activations.find(id)->second),
+                             priority);
             }
 
             // Create Version instance for this version.
@@ -288,7 +299,7 @@ void ItemUpdater::removePreservedPartition()
 
 void ItemUpdater::reset()
 {
-    for(const auto& it : activations)
+    for (const auto& it : activations)
     {
         removeReadWritePartition(it.first);
         removeFile(it.first);
@@ -297,16 +308,17 @@ void ItemUpdater::reset()
     return;
 }
 
-void ItemUpdater::freePriority(uint8_t value)
+void ItemUpdater::freePriority(uint8_t value, const std::string& versionId)
 {
     //TODO openbmc/openbmc#1896 Improve the performance of this function
     for (const auto& intf : activations)
     {
-        if(intf.second->redundancyPriority)
+        if (intf.second->redundancyPriority)
         {
-            if (intf.second->redundancyPriority.get()->priority() == value)
+            if (intf.second->redundancyPriority.get()->priority() == value &&
+                intf.second->versionId != versionId)
             {
-                intf.second->redundancyPriority.get()->priority(value+1);
+                intf.second->redundancyPriority.get()->priority(value + 1);
             }
         }
     }
@@ -316,7 +328,7 @@ bool ItemUpdater::isLowestPriority(uint8_t value)
 {
     for (const auto& intf : activations)
     {
-        if(intf.second->redundancyPriority)
+        if (intf.second->redundancyPriority)
         {
             if (intf.second->redundancyPriority.get()->priority() < value)
             {
@@ -329,6 +341,9 @@ bool ItemUpdater::isLowestPriority(uint8_t value)
 
 void ItemUpdater::erase(std::string entryId)
 {
+    // Remove priority persistence file
+    removeFile(entryId);
+
     // Removing partitions
     removeReadWritePartition(entryId);
     removeReadOnlyPartition(entryId);
@@ -338,8 +353,8 @@ void ItemUpdater::erase(std::string entryId)
     if (it == versions.end())
     {
         log<level::ERR>(("Error: Failed to find version " + entryId + \
-                        " in item updater versions map." \
-                        " Unable to remove.").c_str());
+                         " in item updater versions map." \
+                         " Unable to remove.").c_str());
         return;
     }
     versions.erase(entryId);
@@ -349,12 +364,62 @@ void ItemUpdater::erase(std::string entryId)
     if (ita == activations.end())
     {
         log<level::ERR>(("Error: Failed to find version " + entryId + \
-                        " in item updater activations map." \
-                        " Unable to remove.").c_str());
+                         " in item updater activations map." \
+                         " Unable to remove.").c_str());
         return;
     }
     activations.erase(entryId);
-    removeFile(entryId);
+}
+
+// TODO: openbmc/openbmc#1402 Monitor flash usage
+void ItemUpdater::freeSpace()
+{
+    std::size_t count = 0;
+    decltype(activations.begin()->second->redundancyPriority.get()->priority())
+            highestPriority = 0;
+    decltype(activations.begin()->second->versionId) highestPriorityVersion;
+    for (const auto& iter : activations)
+    {
+        if (iter.second.get()->activation() == server::Activation::Activations::Active)
+        {
+            count++;
+            if (iter.second->redundancyPriority.get()->priority() > highestPriority)
+            {
+                highestPriority = iter.second->redundancyPriority.get()->priority();
+                highestPriorityVersion = iter.second->versionId;
+            }
+        }
+    }
+    // Remove the pnor version with highest priority since the PNOR
+    // can't hold more than 2 versions.
+    if (count >= ACTIVE_PNOR_MAX_ALLOWED)
+    {
+        erase(highestPriorityVersion);
+    }
+}
+
+void ItemUpdater::createActiveAssociation(std::string path)
+{
+    assocs.emplace_back(std::make_tuple(ACTIVE_FWD_ASSOCIATION,
+                                        ACTIVE_REV_ASSOCIATION,
+                                        path));
+    associations(assocs);
+}
+
+void ItemUpdater::removeActiveAssociation(std::string path)
+{
+    for (auto iter = assocs.begin(); iter != assocs.end();)
+    {
+        if ((std::get<2>(*iter)).compare(path) == 0)
+        {
+            iter = assocs.erase(iter);
+            associations(assocs);
+        }
+        else
+        {
+            ++iter;
+        }
+    }
 }
 
 } // namespace updater

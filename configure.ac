@@ -20,6 +20,8 @@ PKG_CHECK_MODULES([SDBUSPLUS], [sdbusplus],,
 PKG_CHECK_MODULES([PHOSPHOR_LOGGING], [phosphor-logging],,
     [AC_MSG_ERROR([The openbmc/phosphor-logging package is required])])
 
+AC_PATH_PROG([SDBUSPLUSPLUS], [sdbus++])
+
 # Checks for library functions
 LT_INIT # Required for systemd linking
 
@@ -51,6 +53,13 @@ AX_APPEND_COMPILE_FLAGS([-Wall -Werror], [CXXFLAGS])
 AC_ARG_VAR(SOFTWARE_OBJPATH, [The software manager Dbus root])
 AS_IF([test "x$SOFTWARE_OBJPATH" == "x"], [SOFTWARE_OBJPATH="/xyz/openbmc_project/software"])
 AC_DEFINE_UNQUOTED([SOFTWARE_OBJPATH], ["$SOFTWARE_OBJPATH"], [The software manager Dbus root])
+
+AC_DEFINE(ACTIVATION_FWD_ASSOCIATION, "inventory", [The name of the activation's forward association.])
+AC_DEFINE(ACTIVATION_REV_ASSOCIATION, "activation", [The name of the activation's reverse association.])
+AC_DEFINE(HOST_INVENTORY_PATH, "/xyz/openbmc_project/inventory/system/chassis", [The host inventory path.])
+
+AC_DEFINE(ACTIVE_FWD_ASSOCIATION, "active", [The name of the active's forward association.])
+AC_DEFINE(ACTIVE_REV_ASSOCIATION, "software_version", [The name of the active's reverse association.])
 
 AC_DEFINE(VERSION_IFACE, "xyz.openbmc_project.Software.Version",
     [The software version manager interface])
@@ -98,6 +107,10 @@ AC_DEFINE(PNOR_RW_ACTIVE_PATH, "/var/lib/phosphor-software-manager/pnor/rw",
     [Path to the active read-write pnor partitions])
 AC_DEFINE(PNOR_PRSV_ACTIVE_PATH, "/var/lib/phosphor-software-manager/pnor/prsv",
     [Path to the active preserved pnor partitions])
+
+AC_ARG_VAR(ACTIVE_PNOR_MAX_ALLOWED, [The maximum allowed active pnor versions])
+AS_IF([test "x$ACTIVE_PNOR_MAX_ALLOWED" == "x"], [ACTIVE_PNOR_MAX_ALLOWED=2])
+AC_DEFINE_UNQUOTED([ACTIVE_PNOR_MAX_ALLOWED], [$ACTIVE_PNOR_MAX_ALLOWED], [The maximum allowed active pnor versions])
 
 AC_CONFIG_FILES([Makefile test/Makefile])
 AC_OUTPUT

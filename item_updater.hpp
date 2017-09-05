@@ -4,6 +4,7 @@
 #include "activation.hpp"
 #include <xyz/openbmc_project/Common/FactoryReset/server.hpp>
 #include "version.hpp"
+#include "org/openbmc/Associations/server.hpp"
 
 namespace openpower
 {
@@ -13,8 +14,12 @@ namespace updater
 {
 
 using ItemUpdaterInherit = sdbusplus::server::object::object<
-    sdbusplus::xyz::openbmc_project::Common::server::FactoryReset>;
+    sdbusplus::xyz::openbmc_project::Common::server::FactoryReset,
+    sdbusplus::org::openbmc::server::Associations>;
 namespace MatchRules = sdbusplus::bus::match::rules;
+
+using AssociationList =
+        std::vector<std::tuple<std::string, std::string, std::string>>;
 
 /** @class ItemUpdater
  *  @brief Manages the activation of the version items.
@@ -46,10 +51,11 @@ class ItemUpdater : public ItemUpdaterInherit
          *  any existing priority with the same value by 1
          *
          *  @param[in] value - The priority that needs to be set free.
-         *
+         *  @param[in] versionId - The Id of the version for which we
+         *                         are trying to free up the priority.
          *  @return None
          */
-        void freePriority(uint8_t value);
+        void freePriority(uint8_t value, const std::string& versionId);
 
         /** @brief Determine is the given priority is the lowest
          *
@@ -72,6 +78,24 @@ class ItemUpdater : public ItemUpdaterInherit
          *  @return None
          */
         void erase(std::string entryId);
+
+        /** @brief Deletes the active pnor version with highest priority
+                   if the total number of volume exceeds the threshold.
+         */
+        void freeSpace();
+
+        /** @brief Creates an active association to the
+         *  newly active software image
+         *
+         * @param[in]  path - The path to create the association to.
+         */
+        void createActiveAssociation(std::string path);
+
+        /** @brief Removes an active association to the software image
+         *
+         * @param[in]  path - The path to remove the association from.
+         */
+        void removeActiveAssociation(std::string path);
 
     private:
         /** @brief Callback function for Software.Version match.
@@ -103,6 +127,9 @@ class ItemUpdater : public ItemUpdaterInherit
 
         /** @brief sdbusplus signal match for Software.Version */
         sdbusplus::bus::match_t versionMatch;
+
+        /** @brief This entry's associations */
+        AssociationList assocs = {};
 
         /** @brief Clears read only PNOR partition for
          *  given Activation dbus object
