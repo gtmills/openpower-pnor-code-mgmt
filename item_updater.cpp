@@ -158,17 +158,22 @@ void ItemUpdater::processPNORImage()
         auto activationState = server::Activation::Activations::Active;
 
         static const auto PNOR_RO_PREFIX_LEN = strlen(PNOR_RO_PREFIX);
+        static const auto PNOR_RW_PREFIX_LEN = strlen(PNOR_RW_PREFIX);
 
         // Check if the PNOR_RO_PREFIX is the prefix of the iter.path
         if (0 == iter.path().native().compare(0, PNOR_RO_PREFIX_LEN,
                                               PNOR_RO_PREFIX))
         {
+            // The versionId is extracted from the path
+            // for example /media/pnor-ro-2a1022fe.
+            auto id = iter.path().native().substr(PNOR_RO_PREFIX_LEN);
             auto pnorTOC = iter.path() / PNOR_TOC_FILE;
             if (!fs::is_regular_file(pnorTOC))
             {
-                log<level::ERR>("Failed to read pnorTOC\n",
+                log<level::ERR>("Failed to read pnorTOC.\n",
                                 entry("FileName=%s", pnorTOC.string()));
-                activationState = server::Activation::Activations::Invalid;
+                ItemUpdater::erase(id);
+                continue;
             }
             auto keyValues =
                     Version::getValue(pnorTOC,
@@ -190,9 +195,6 @@ void ItemUpdater::processPNORImage()
                 activationState = server::Activation::Activations::Invalid;
             }
 
-            // The versionId is extracted from the path
-            // for example /media/pnor-ro-2a1022fe
-            auto id = iter.path().native().substr(PNOR_RO_PREFIX_LEN);
             auto purpose = server::Version::VersionPurpose::Host;
             auto path = fs::path(SOFTWARE_OBJPATH) / id;
             AssociationList associations = {};
@@ -249,6 +251,25 @@ void ItemUpdater::processPNORImage()
                                      "",
                                      *this)));
         }
+        else if (0 == iter.path().native().compare(0, PNOR_RW_PREFIX_LEN,
+                                                      PNOR_RW_PREFIX))
+        {
+            auto id = iter.path().native().substr(PNOR_RW_PREFIX_LEN);
+            auto roDir = PNOR_RO_PREFIX + id;
+            if (!fs::is_directory(roDir))
+            {
+                log<level::ERR>("No corresponding read-only volume found.",
+                                entry("DIRNAME=%s", roDir));
+                ItemUpdater::erase(id);
+            }
+        }
+    }
+
+    // Look at the RO symlink to determine if there is a functional image
+    auto id = determineId(PNOR_RO_ACTIVE_PATH);
+    if (!id.empty())
+    {
+        updateFunctionalAssociation(std::string{SOFTWARE_OBJPATH} + '/' + id);
     }
     return;
 }
@@ -459,6 +480,34 @@ void ItemUpdater::erase(std::string entryId)
     activations.erase(entryId);
 }
 
+void ItemUpdater::deleteAll()
+{
+    std::vector<std::string> deletableActivations;
+
+    for (const auto& activationIt : activations)
+    {
+        if (!isVersionFunctional(activationIt.first))
+        {
+            deletableActivations.push_back(activationIt.first);
+        }
+    }
+
+    for (const auto& deletableIt : deletableActivations)
+    {
+        ItemUpdater::erase(deletableIt);
+    }
+
+    // Remove any remaining pnor-ro- or pnor-rw- volumes that do not match
+    // the current version.
+    auto method = bus.new_method_call(
+            SYSTEMD_BUSNAME,
+            SYSTEMD_PATH,
+            SYSTEMD_INTERFACE,
+            "StartUnit");
+    method.append("obmc-flash-bios-cleanup.service", "replace");
+    bus.call_noreply(method);
+}
+
 // TODO: openbmc/openbmc#1402 Monitor flash usage
 void ItemUpdater::freeSpace()
 {
@@ -486,7 +535,7 @@ void ItemUpdater::freeSpace()
     }
 }
 
-void ItemUpdater::createActiveAssociation(std::string path)
+void ItemUpdater::createActiveAssociation(const std::string& path)
 {
     assocs.emplace_back(std::make_tuple(ACTIVE_FWD_ASSOCIATION,
                                         ACTIVE_REV_ASSOCIATION,
@@ -494,11 +543,32 @@ void ItemUpdater::createActiveAssociation(std::string path)
     associations(assocs);
 }
 
-void ItemUpdater::removeActiveAssociation(std::string path)
+void ItemUpdater::updateFunctionalAssociation(const std::string& path)
+{
+    // remove all functional associations
+    for (auto iter = assocs.begin(); iter != assocs.end();)
+    {
+        if ((std::get<0>(*iter)).compare(FUNCTIONAL_FWD_ASSOCIATION) == 0)
+        {
+            iter = assocs.erase(iter);
+        }
+        else
+        {
+            ++iter;
+        }
+    }
+    assocs.emplace_back(std::make_tuple(FUNCTIONAL_FWD_ASSOCIATION,
+                                        FUNCTIONAL_REV_ASSOCIATION,
+                                        path));
+    associations(assocs);
+}
+
+void ItemUpdater::removeActiveAssociation(const std::string& path)
 {
     for (auto iter = assocs.begin(); iter != assocs.end();)
     {
-        if ((std::get<2>(*iter)).compare(path) == 0)
+        if ((std::get<0>(*iter)).compare(ACTIVE_FWD_ASSOCIATION) == 0 &&
+            (std::get<2>(*iter)).compare(path) == 0)
         {
             iter = assocs.erase(iter);
             associations(assocs);
@@ -508,6 +578,26 @@ void ItemUpdater::removeActiveAssociation(std::string path)
             ++iter;
         }
     }
+}
+
+std::string ItemUpdater::determineId(const std::string& symlinkPath)
+{
+    if (!fs::exists(symlinkPath))
+    {
+        return {};
+    }
+
+    auto target = fs::canonical(symlinkPath).string();
+
+    // check to make sure the target really exists
+    if (!fs::is_regular_file(target + "/" + PNOR_TOC_FILE))
+    {
+        return {};
+    }
+    // Get the image <id> from the symlink target
+    // for example /media/ro-2a1022fe
+    static const auto PNOR_RO_PREFIX_LEN = strlen(PNOR_RO_PREFIX);
+    return target.substr(PNOR_RO_PREFIX_LEN);
 }
 
 } // namespace updater

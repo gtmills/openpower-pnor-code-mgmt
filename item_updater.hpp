@@ -5,6 +5,7 @@
 #include <xyz/openbmc_project/Common/FactoryReset/server.hpp>
 #include "version.hpp"
 #include "org/openbmc/Associations/server.hpp"
+#include "xyz/openbmc_project/Collection/DeleteAll/server.hpp"
 
 namespace openpower
 {
@@ -14,23 +15,24 @@ namespace updater
 {
 
 using ItemUpdaterInherit = sdbusplus::server::object::object<
-    sdbusplus::xyz::openbmc_project::Common::server::FactoryReset,
-    sdbusplus::org::openbmc::server::Associations>;
+        sdbusplus::xyz::openbmc_project::Common::server::FactoryReset,
+        sdbusplus::org::openbmc::server::Associations,
+        sdbusplus::xyz::openbmc_project::Collection::server::DeleteAll>;
 namespace MatchRules = sdbusplus::bus::match::rules;
 
 using AssociationList =
         std::vector<std::tuple<std::string, std::string, std::string>>;
 
 /** @class ItemUpdater
- *  @brief Manages the activation of the version items.
+ *  @brief Manages the activation of the host version items.
  */
 class ItemUpdater : public ItemUpdaterInherit
 {
     public:
         /** @brief Constructs ItemUpdater
          *
-         * @param[in] bus    - The Dbus bus object
-         * @param[in] path   - The Dbus path
+         * @param[in] bus    - The D-Bus bus object
+         * @param[in] path   - The D-Bus path
          */
         ItemUpdater(sdbusplus::bus::bus& bus, const std::string& path) :
                     ItemUpdaterInherit(bus, path.c_str()),
@@ -79,49 +81,69 @@ class ItemUpdater : public ItemUpdaterInherit
          */
         void erase(std::string entryId);
 
-        /** @brief Deletes the active pnor version with highest priority
-                   if the total number of volume exceeds the threshold.
+        /**
+         * @brief Erases any non-active pnor versions.
+         */
+        void deleteAll();
+
+        /** @brief Deletes the active PNOR version with highest priority
+                   if the total number of volumes exceeds the threshold.
          */
         void freeSpace();
+
+        /** @brief Determine the software version id
+         *         from the symlink target (e.g. /media/ro-2a1022fe).
+         *
+         * @param[in] symlinkPath - The path of the symlink.
+         * @param[out] id - The version id as a string.
+         */
+        static std::string determineId(const std::string& symlinkPath);
 
         /** @brief Creates an active association to the
          *  newly active software image
          *
          * @param[in]  path - The path to create the association to.
          */
-        void createActiveAssociation(std::string path);
+        void createActiveAssociation(const std::string& path);
+
+        /** @brief Updates the functional association to the
+         *  new "running" PNOR image
+         *
+         * @param[in]  path - The path to update the association to.
+         */
+        void updateFunctionalAssociation(const std::string& path);
 
         /** @brief Removes an active association to the software image
          *
          * @param[in]  path - The path to remove the association from.
          */
-        void removeActiveAssociation(std::string path);
+        void removeActiveAssociation(const std::string& path);
 
     private:
         /** @brief Callback function for Software.Version match.
-         *  @details Creates an Activation dbus object.
+         *  @details Creates an Activation D-Bus object.
          *
          * @param[in]  msg       - Data associated with subscribed signal
          */
         void createActivation(sdbusplus::message::message& msg);
 
         /**
-         * @brief Validates the presence of SquashFS iamge in the image dir.
+         * @brief Validates the presence of SquashFS image in the image dir.
          *
-         * @param[in]  filePath - The path to the SquashfFS image.
+         * @param[in]  filePath - The path to the SquashFS image.
          * @param[out] result    - 0 --> if validation was successful
          *                       - -1--> Otherwise
          */
         static int validateSquashFSImage(const std::string& filePath);
 
-        /** @brief Persistent sdbusplus DBus bus connection. */
+        /** @brief Persistent sdbusplus D-Bus bus connection. */
         sdbusplus::bus::bus& bus;
 
-        /** @brief Persistent map of Activation dbus objects and their
+        /** @brief Persistent map of Activation D-Bus objects and their
           * version id */
         std::map<std::string, std::unique_ptr<Activation>> activations;
 
-        /** @brief Persistent map of Version dbus objects and their
+        /** @brief Persistent map of Version D-Bus objects and their
           * version id */
         std::map<std::string, std::unique_ptr<Version>> versions;
 
@@ -132,14 +154,14 @@ class ItemUpdater : public ItemUpdaterInherit
         AssociationList assocs = {};
 
         /** @brief Clears read only PNOR partition for
-         *  given Activation dbus object
+         *  given Activation D-Bus object
          *
          * @param[in]  versionId - The id of the ro partition to remove.
          */
         void removeReadOnlyPartition(std::string versionId);
 
         /** @brief Clears read write PNOR partition for
-         *  given Activation dbus object
+         *  given Activation D-Bus object
          *
          *  @param[in]  versionId - The id of the rw partition to remove.
          */
@@ -149,7 +171,7 @@ class ItemUpdater : public ItemUpdaterInherit
         void removePreservedPartition();
 
         /** @brief Host factory reset - clears PNOR partitions for each
-          * Activation dbus object */
+          * Activation D-Bus object */
         void reset() override;
 
         /** @brief Check whether the provided image id is the functional one
