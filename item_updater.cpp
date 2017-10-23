@@ -138,8 +138,7 @@ void ItemUpdater::createActivation(sdbusplus::message::message& m)
                                 path,
                                 version,
                                 purpose,
-                                filePath,
-                                *this)));
+                                filePath)));
     }
     else
     {
@@ -248,8 +247,7 @@ void ItemUpdater::processPNORImage()
                                      path,
                                      version,
                                      purpose,
-                                     "",
-                                     *this)));
+                                     "")));
         }
         else if (0 == iter.path().native().compare(0, PNOR_RW_PREFIX_LEN,
                                                       PNOR_RW_PREFIX))
@@ -318,28 +316,43 @@ void ItemUpdater::removeReadWritePartition(std::string versionId)
         bus.call_noreply(method);
 }
 
-void ItemUpdater::removePreservedPartition()
+void ItemUpdater::reset()
 {
-    // Remove the preserved partition.
+    for (const auto& it : activations)
+    {
+        auto serviceFile = "obmc-flash-bios-ubiclear@pnor-rw-" + it.first +
+                ".service";
+
+        // Clear the read-write partitions.
+        auto method = bus.new_method_call(
+                SYSTEMD_BUSNAME,
+                SYSTEMD_PATH,
+                SYSTEMD_INTERFACE,
+                "StartUnit");
+        method.append(serviceFile, "replace");
+        auto reply = bus.call(method);
+
+        if (reply.is_method_error())
+        {
+            elog<InternalFailure>();
+        }
+
+        removeFile(it.first);
+    }
+    // Clear the preserved partition.
     auto method = bus.new_method_call(
             SYSTEMD_BUSNAME,
             SYSTEMD_PATH,
             SYSTEMD_INTERFACE,
             "StartUnit");
-    method.append("obmc-flash-bios-ubiumount-prsv.service", "replace");
-    bus.call_noreply(method);
+    method.append("obmc-flash-bios-ubiclear@pnor-prsv.service", "replace");
+    auto reply = bus.call(method);
 
-    return;
-}
-
-void ItemUpdater::reset()
-{
-    for (const auto& it : activations)
+    if (reply.is_method_error())
     {
-        removeReadWritePartition(it.first);
-        removeFile(it.first);
+        elog<InternalFailure>();
     }
-    removePreservedPartition();
+
     return;
 }
 
